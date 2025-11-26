@@ -1,0 +1,4 @@
+# Place SAM3 checkpoint files here after downloading from HuggingFace
+# TODO: Download SAM3 weights from https://huggingface.co/facebook/sam3
+# and place checkpoint files (e.g., sam3_image.pth, sam3_video.pth) in this directory
+
