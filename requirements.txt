@@ -23,6 +23,9 @@ transformers>=4.45.0
 accelerate>=0.30.0
 huggingface_hub>=0.20.0
 
+# Environment variable management
+python-dotenv>=1.0.0
+
 # Note: SAM3 is now loaded via HuggingFace Transformers
-# Authentication required: huggingface-cli login
+# Authentication required: Set HF_TOKEN in .env.local file (not committed to git)
 

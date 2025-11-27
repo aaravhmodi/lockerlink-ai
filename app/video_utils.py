@@ -192,6 +192,61 @@ def extract_frames(
         raise
 
 
+def create_annotated_video(
+    annotated_frames: List[Dict],
+    output_path: str,
+    fps: float = 10.0
+) -> str:
+    """
+    Create a video from annotated frames showing the analysis.
+    
+    Args:
+        annotated_frames: List of dicts with 'frame' and 'image' (PIL Image) keys
+        output_path: Path to save the output video
+        fps: Frames per second for output video
+    
+    Returns:
+        Path to created video file
+    """
+    logger.info(f"Creating annotated video with {len(annotated_frames)} frames at {fps} fps")
+    logger.debug(f"Output path: {output_path}")
+    
+    if not annotated_frames:
+        raise ValueError("No annotated frames provided")
+    
+    # Get video dimensions from first frame
+    first_frame = annotated_frames[0]["image"]
+    width, height = first_frame.size
+    logger.debug(f"Video dimensions: {width}x{height}")
+    
+    # Define codec and create VideoWriter
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    if not out.isOpened():
+        raise ValueError(f"Failed to create video writer for {output_path}")
+    
+    try:
+        for af in sorted(annotated_frames, key=lambda x: x["frame"]):
+            # Convert PIL Image to OpenCV format
+            img = af["image"]
+            # Convert RGB to BGR for OpenCV
+            img_array = np.array(img)
+            if len(img_array.shape) == 3:
+                img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            else:
+                img_bgr = img_array
+            
+            out.write(img_bgr)
+            logger.debug(f"Wrote frame {af['frame']} to video")
+        
+        logger.info(f"Successfully created annotated video: {output_path}")
+        return output_path
+        
+    finally:
+        out.release()
+
+
 def extract_frame_at_time(
     video_path: str,
     timestamp: float,

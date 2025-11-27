@@ -18,7 +18,7 @@ from django.core.files.base import ContentFile
 from PIL import Image
 
 from app.sam3_inference import load_sam3_image_model, load_sam3_video_model, segment_image
-from app.video_utils import download_video, extract_frames
+from app.video_utils import download_video, extract_frames, create_annotated_video
 from app.analysis_utils import analyze_volleyball_video, calculate_metrics
 
 logger = logging.getLogger(__name__)
@@ -545,6 +545,36 @@ def test_swing_video(request):
         logger.debug("Calculating metrics...")
         metrics = calculate_metrics(analysis_result)
         
+        # Create annotated video
+        debug_info['steps'].append('Creating annotated video')
+        logger.debug("Creating annotated video from frames...")
+        annotated_frames = analysis_result.get("annotated_frames", [])
+        annotated_video_path = None
+        
+        if annotated_frames:
+            try:
+                # Create temporary video file
+                import tempfile
+                video_fd, annotated_video_path = tempfile.mkstemp(suffix='.mp4', prefix='annotated_')
+                os.close(video_fd)
+                
+                logger.debug(f"Creating annotated video at: {annotated_video_path}")
+                create_annotated_video(annotated_frames, annotated_video_path, fps=10.0)
+                
+                # Read video file and convert to base64
+                with open(annotated_video_path, 'rb') as video_file:
+                    video_data = video_file.read()
+                    video_base64 = base64.b64encode(video_data).decode()
+                    debug_info['annotated_video_size'] = f"{len(video_data) / (1024*1024):.2f} MB"
+                    logger.debug(f"Annotated video created: {len(video_data) / (1024*1024):.2f} MB")
+            except Exception as e:
+                logger.warning(f"Failed to create annotated video: {e}", exc_info=True)
+                debug_info['warnings'].append(f"Failed to create annotated video: {e}")
+                video_base64 = None
+        else:
+            video_base64 = None
+            logger.warning("No annotated frames to create video from")
+        
         total_time = time.time() - debug_info['start_time']
         debug_info['total_time'] = f"{total_time:.2f}s"
         debug_info['steps'].append('Analysis complete')
@@ -554,12 +584,11 @@ def test_swing_video(request):
         logger.debug(f"Total time: {total_time:.2f}s")
         logger.debug("=" * 80)
         
-        # Convert annotated frames to base64 for frontend display
+        # Convert annotated frames to base64 for frontend display (first 20 for preview)
         annotated_frames_data = []
-        annotated_frames = analysis_result.get("annotated_frames", [])
         logger.debug(f"Converting {len(annotated_frames)} annotated frames to base64...")
         
-        for af in annotated_frames[:20]:  # Limit to first 20 frames
+        for af in annotated_frames[:20]:  # Limit to first 20 frames for preview
             try:
                 img = af["image"]
                 buffered = BytesIO()
@@ -592,6 +621,7 @@ def test_swing_video(request):
             },
             "metrics": metrics,
             "annotated_frames": annotated_frames_data,
+            "annotated_video": f"data:video/mp4;base64,{video_base64}" if video_base64 else None,
             "raw_data": {
                 "player_tracks_count": len(analysis_result.get("player_tracks", [])),
                 "ball_tracks_count": len(analysis_result.get("ball_tracks", [])),
@@ -600,6 +630,14 @@ def test_swing_video(request):
             },
             "debug_info": debug_info
         }
+        
+        # Clean up temporary video file
+        if annotated_video_path and os.path.exists(annotated_video_path):
+            try:
+                os.remove(annotated_video_path)
+                logger.debug(f"Cleaned up temporary video: {annotated_video_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up video file: {e}")
         
         response = JsonResponse(response_data)
         response["Access-Control-Allow-Origin"] = "*"

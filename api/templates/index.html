@@ -519,9 +519,15 @@
                 console.log(`Ball Touch Detected: ${metrics.ball_touch_detected}`);
             }
             
-            // Display annotated frames
+            // Display annotated video if available
+            if (result.annotated_video) {
+                console.log("Displaying annotated video");
+                displayAnnotatedVideo(result.annotated_video);
+            }
+            
+            // Display annotated frames (preview)
             if (result.annotated_frames && result.annotated_frames.length > 0) {
-                console.log(`Displaying ${result.annotated_frames.length} annotated frames`);
+                console.log(`Displaying ${result.annotated_frames.length} annotated frames (preview)`);
                 displayAnnotatedFrames(result.annotated_frames);
             }
             
@@ -560,6 +566,45 @@
             }
             
             resultsSection.style.display = 'block';
+        }
+        
+        function displayAnnotatedVideo(videoData) {
+            console.log("Creating annotated video display...");
+            const resultsSection = document.getElementById('resultsSection');
+            
+            // Remove existing video display if any
+            const existingVideo = document.getElementById('annotatedVideoDisplay');
+            if (existingVideo) {
+                existingVideo.remove();
+            }
+            
+            const videoContainer = document.createElement('div');
+            videoContainer.id = 'annotatedVideoDisplay';
+            videoContainer.style.cssText = 'margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px;';
+            videoContainer.innerHTML = '<h3 style="margin-bottom: 20px;">🎥 Annotated Analysis Video</h3>';
+            
+            const video = document.createElement('video');
+            video.src = videoData;
+            video.controls = true;
+            video.style.cssText = 'width: 100%; max-width: 800px; border-radius: 8px; box-shadow: 0 5px 15px rgba(0,0,0,0.2);';
+            video.style.display = 'block';
+            video.style.margin = '0 auto';
+            
+            const downloadBtn = document.createElement('button');
+            downloadBtn.textContent = 'Download Annotated Video';
+            downloadBtn.className = 'upload-btn';
+            downloadBtn.style.cssText = 'margin-top: 15px; display: block; margin-left: auto; margin-right: auto;';
+            downloadBtn.onclick = function() {
+                const a = document.createElement('a');
+                a.href = videoData;
+                a.download = 'annotated_analysis.mp4';
+                a.click();
+            };
+            
+            videoContainer.appendChild(video);
+            videoContainer.appendChild(downloadBtn);
+            resultsSection.appendChild(videoContainer);
+            console.log("Annotated video displayed");
         }
         
         function displayAnnotatedFrames(frames) {
