@@ -37,19 +37,11 @@ RUN pip3.12 install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app/ ./app/
+COPY api/ ./api/
+COPY lockerlink_ai/ ./lockerlink_ai/
 COPY models/ ./models/
-
-# Copy SAM3 directory (should be cloned before building)
-# If SAM3 is not present, the build will fail - user must clone it first
-COPY sam3/ ./sam3/
-
-# Install SAM3 in editable mode
-RUN if [ -d "./sam3" ] && [ -f "./sam3/setup.py" ]; then \
-        pip3.12 install --no-cache-dir -e ./sam3; \
-    else \
-        echo "WARNING: SAM3 directory not found. Please clone SAM3 repo before building Docker image."; \
-        exit 1; \
-    fi
+COPY main.py ./
+COPY manage.py ./
 
 # Expose port
 EXPOSE 8000
@@ -59,5 +51,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python3.12 -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
 
 # Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py", "runserver", "0.0.0.0:8000"]
 

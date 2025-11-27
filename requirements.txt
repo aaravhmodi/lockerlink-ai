@@ -5,9 +5,8 @@ torch==2.7.0
 torchvision
 torchaudio
 
-# FastAPI and server
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
+# Django web framework
+Django>=5.0.0
 
 # Image and video processing
 opencv-python==4.10.0.84

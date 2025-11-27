@@ -22,6 +22,18 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
+# Get HuggingFace token from environment or Django settings
+def get_hf_token():
+    """Get HuggingFace token from environment or settings."""
+    token = os.environ.get('HF_TOKEN')
+    if not token:
+        try:
+            from django.conf import settings
+            token = getattr(settings, 'HF_TOKEN', None)
+        except:
+            pass
+    return token
+
 # Global model cache
 _image_model = None
 _image_processor = None
@@ -106,29 +118,33 @@ def load_sam3_image_model(checkpoint_path: Optional[str] = None) -> Tuple[Any, A
         device = get_device()
         
         logger.info("Loading SAM3 image model from HuggingFace (facebook/sam3)...")
-        logger.info("Make sure you're authenticated: huggingface-cli login")
+        
+        # Get token for authentication
+        token = get_hf_token()
+        if token:
+            logger.debug("Using HuggingFace token for authentication")
+            os.environ['HF_TOKEN'] = token
         
         # Use pipeline approach for SAM3 (recommended by HuggingFace)
         # Pipeline handles both model and processor automatically
         try:
-            _image_processor = pipeline("mask-generation", model="facebook/sam3", device=device)
+            _image_processor = pipeline("mask-generation", model="facebook/sam3", device=device, token=token)
             _image_model = _image_processor.model  # Extract model from pipeline
             logger.info("Loaded SAM3 using pipeline approach")
         except Exception as pipeline_error:
             logger.warning(f"Pipeline approach failed: {pipeline_error}")
             logger.info("Falling back to direct AutoModel loading...")
             # Fallback: Try loading model directly (may not work without processor)
-            _image_model = AutoModel.from_pretrained("facebook/sam3").to(device)
+            from transformers import AutoImageProcessor
+            _image_processor = AutoImageProcessor.from_pretrained("facebook/sam3", token=token)
+            _image_model = AutoModel.from_pretrained("facebook/sam3", token=token).to(device)
             _image_model.eval()
-            _image_processor = None  # Will need to handle processing differently
         
         logger.info(f"SAM3 image model loaded successfully on {device}")
         return _image_model, _image_processor
         
     except Exception as e:
         logger.error(f"Failed to load SAM3 image model: {e}", exc_info=True)
-        logger.error("Make sure you're authenticated with HuggingFace: huggingface-cli login")
-        logger.error("Or set HF_TOKEN environment variable")
         raise
 
 
@@ -264,13 +280,21 @@ def load_sam3_video_model(checkpoint_path: Optional[str] = None) -> Any:
     
     try:
         device = get_device()
-        
+
         logger.info("Loading SAM3 video model from HuggingFace (facebook/sam3)...")
-        logger.info("Make sure you're authenticated: huggingface-cli login")
         
+        # Get token for authentication
+        token = get_hf_token()
+        if token:
+            logger.debug("Using HuggingFace token for authentication")
+            os.environ['HF_TOKEN'] = token
+
         # Load video model using HuggingFace Transformers AutoModel
         # Use bfloat16 for video models (better performance)
-        _video_model = AutoModel.from_pretrained("facebook/sam3").to(device, dtype=torch.bfloat16)
+        _video_model = AutoModel.from_pretrained(
+            "facebook/sam3",
+            token=token
+        ).to(device, dtype=torch.bfloat16)
         _video_model.eval()
         
         logger.info(f"SAM3 video model loaded successfully on {device}")
@@ -278,8 +302,6 @@ def load_sam3_video_model(checkpoint_path: Optional[str] = None) -> Any:
         
     except Exception as e:
         logger.error(f"Failed to load SAM3 video model: {e}", exc_info=True)
-        logger.error("Make sure you're authenticated with HuggingFace: huggingface-cli login")
-        logger.error("Or set HF_TOKEN environment variable")
         raise
 
 

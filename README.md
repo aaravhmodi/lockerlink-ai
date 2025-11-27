@@ -15,9 +15,19 @@ A Python microservice using FastAPI, PyTorch, and SAM3 (Segment Anything Model 3
 lockerlink-ai/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py              # FastAPI entry point with /test endpoint
 │   ├── sam3_inference.py    # SAM3 model loading and inference
-│   └── video_utils.py       # Video download and frame extraction
+│   ├── video_utils.py       # Video download and frame extraction
+│   └── analysis_utils.py    # Volleyball metrics calculation
+├── api/
+│   ├── __init__.py
+│   ├── views.py             # Django API views
+│   └── urls.py              # URL routing
+├── lockerlink_ai/
+│   ├── settings.py          # Django settings
+│   ├── urls.py              # Main URL configuration
+│   └── wsgi.py              # WSGI configuration
+├── main.py                  # Simple entry point: python main.py runserver
+├── manage.py                # Django management script
 ├── models/
 │   └── sam3_weights/        # SAM3 checkpoints (manually downloaded)
 ├── sam3/                    # SAM3 repository (cloned from GitHub)
@@ -71,13 +81,22 @@ Place a test image at `app/test_image.jpg` for the `/test` endpoint. If not pres
 ### Development Mode
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python main.py runserver
+```
+
+Or with custom host/port:
+
+```bash
+python main.py runserver 0.0.0.0:8000
 ```
 
 ### Production Mode
 
+For production, use a proper WSGI server:
+
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Using gunicorn (install with: pip install gunicorn)
+gunicorn lockerlink_ai.wsgi:application --bind 0.0.0.0:8000
 ```
 
 The service will be available at `http://localhost:8000`

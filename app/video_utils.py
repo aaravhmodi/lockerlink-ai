@@ -6,6 +6,7 @@ Handles downloading videos from Firebase/Supabase and extracting frames with Ope
 import os
 import tempfile
 import logging
+import time
 from pathlib import Path
 from typing import List, Optional
 import cv2
@@ -94,26 +95,42 @@ def extract_frames(
         List of PIL Images (frames)
     """
     try:
+        logger.debug("=" * 80)
+        logger.debug("EXTRACTING FRAMES FROM VIDEO")
+        logger.debug(f"Video path: {video_path}")
+        logger.debug(f"Target FPS: {fps}")
+        logger.debug(f"Max frames: {max_frames}")
+        logger.debug("=" * 80)
+        
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
         
         logger.info(f"Extracting frames from: {video_path} at {fps} fps")
+        logger.debug(f"File exists: {os.path.exists(video_path)}")
+        logger.debug(f"File size: {os.path.getsize(video_path) / (1024*1024):.2f} MB")
         
         # Open video
+        logger.debug("Opening video with OpenCV...")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"Failed to open video: {video_path}")
+        logger.debug("Video opened successfully")
         
         # Get video properties
         video_fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         duration = total_frames / video_fps if video_fps > 0 else 0
         
         logger.info(f"Video properties: {total_frames} frames, {video_fps:.2f} fps, {duration:.2f}s duration")
+        logger.debug(f"Video resolution: {width}x{height}")
+        logger.debug(f"Video codec: {int(cap.get(cv2.CAP_PROP_FOURCC))}")
         
         # Calculate frame interval
         frame_interval = max(1, int(video_fps / fps)) if video_fps > 0 else 1
         logger.info(f"Extracting every {frame_interval} frame(s)")
+        logger.debug(f"Frame interval calculation: {video_fps} fps / {fps} target = {frame_interval}")
         
         frames = []
         frame_count = 0
@@ -123,18 +140,28 @@ def extract_frames(
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         
+        logger.debug("Starting frame extraction loop...")
+        extraction_start = time.time()
+        
         while True:
             ret, frame = cap.read()
             if not ret:
+                logger.debug(f"End of video reached at frame {frame_count}")
                 break
             
             # Extract frame at specified interval
             if frame_count % frame_interval == 0:
+                extract_frame_start = time.time()
+                
                 # Convert BGR to RGB for PIL
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_image = Image.fromarray(frame_rgb)
                 frames.append(pil_image)
                 extracted_count += 1
+                
+                extract_time = time.time() - extract_frame_start
+                if extracted_count % 10 == 0 or extracted_count <= 5:
+                    logger.debug(f"Extracted frame {extracted_count} (video frame {frame_count}) in {extract_time:.3f}s")
                 
                 # Save frame if output directory specified
                 if output_dir:
@@ -145,13 +172,19 @@ def extract_frames(
                 # Check max_frames limit
                 if max_frames and extracted_count >= max_frames:
                     logger.info(f"Reached max_frames limit: {max_frames}")
+                    logger.debug(f"Stopping extraction at frame {frame_count}")
                     break
             
             frame_count += 1
         
+        extraction_time = time.time() - extraction_start
         cap.release()
         
-        logger.info(f"Extracted {len(frames)} frames from video")
+        logger.info(f"Extracted {len(frames)} frames from video in {extraction_time:.2f}s")
+        logger.debug(f"Average time per frame: {extraction_time/len(frames) if frames else 0:.3f}s")
+        logger.debug(f"Frame extraction rate: {len(frames)/extraction_time if extraction_time > 0 else 0:.1f} frames/sec")
+        logger.debug("=" * 80)
+        
         return frames
         
     except Exception as e:
