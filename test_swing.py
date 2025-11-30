@@ -1,526 +1,367 @@
 """
 SAM3 Swing.mov Analysis Script
-Tracks the player that touches the volleyball and creates an annotated video.
-Usage: python test_swing.py
+Player + Ball Tracking
+Last Touch Detection
+Jump Height Estimation
+Ball Speed Estimation
+Creates annotated output video.
 """
 
 import os
-import sys
+import numpy as np
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-import numpy as np
-import cv2
+from moviepy.editor import ImageSequenceClip
 
-# Set BASE_DIR first
+import torch
+from transformers import Sam3VideoModel, Sam3VideoProcessor
+from transformers.video_utils import load_video
+
+
 BASE_DIR = Path(__file__).resolve().parent
 
-# Load environment variables from .env.local
-try:
-    from dotenv import load_dotenv
-    load_dotenv(dotenv_path=BASE_DIR / '.env.local')
-    load_dotenv(dotenv_path=BASE_DIR / '.env')
-except ImportError:
-    pass  # Will load manually if dotenv not available
+# -------------------------------
+# Config
+# -------------------------------
+TOUCH_DISTANCE_PX = 80.0  # threshold for "ball touching player"
 
-# Add app directory to path
-sys.path.insert(0, str(BASE_DIR))
+PLAYER_COLORS = [
+    (0, 255, 0),    # green
+    (0, 0, 255),    # blue
+    (255, 255, 0),  # yellow
+    (255, 0, 255),  # magenta
+    (0, 255, 255),  # cyan
+    (255, 128, 0),  # orange
+    (128, 0, 255),  # purple
+    (0, 128, 255)   # sky blue
+]
 
-from app.sam3_inference import segment_image, get_hf_token
-from app.video_utils import extract_frames, create_annotated_video
+BALL_COLOR = (255, 0, 0)  # bright red
 
-
-def calculate_center(box):
-    """Calculate center point of a bounding box [x1, y1, x2, y2]."""
-    if box is None or len(box) < 4:
-        return None
-    x1, y1, x2, y2 = box[:4]
-    return ((x1 + x2) / 2, (y1 + y2) / 2)
-
-
-def calculate_distance(point1, point2):
-    """Calculate Euclidean distance between two points."""
-    if point1 is None or point2 is None:
-        return float('inf')
-    return np.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+PLAYER_ALPHA = 140
+BALL_ALPHA = 200
 
 
-def find_closest_player_to_ball(player_results, ball_results):
+# -------------------------------
+# Utility functions
+# -------------------------------
+
+def center_of_box(box):
+    x1, y1, x2, y2 = box
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+def euclidean(a, b):
+    return np.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
+
+def draw_box(draw, box, color, label, font):
+    x1, y1, x2, y2 = map(int, box)
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+    w, h = draw.textsize(label, font=font)
+    draw.rectangle([x1, y1 - h, x1 + w, y1], fill=color)
+    draw.text((x1, y1 - h), label, fill="white", font=font)
+
+def to_numpy_mask(mask):
     """
-    Find the player closest to the ball.
-    
-    Args:
-        player_results: Dict with 'boxes', 'masks', 'scores' from SAM3
-        ball_results: Dict with 'boxes', 'masks', 'scores' from SAM3
-    
-    Returns:
-        Dict with closest player info: {'box': [...], 'mask': ..., 'score': ..., 'distance': ...}
+    SAM3 masks can be torch tensors or numpy; normalize to numpy bool array.
+    Expect shape (H, W).
     """
-    # Check if boxes exist (handle None and tensors properly)
-    player_boxes_raw = player_results.get("boxes")
-    ball_boxes_raw = ball_results.get("boxes")
-    
-    if player_boxes_raw is None or ball_boxes_raw is None:
+    if mask is None:
         return None
-    
-    # Convert tensors to lists if needed
-    if hasattr(player_boxes_raw, 'tolist'):
-        player_boxes = player_boxes_raw.tolist()
-    elif hasattr(player_boxes_raw, 'cpu'):
-        player_boxes = player_boxes_raw.cpu().tolist()
-    else:
-        player_boxes = player_boxes_raw
-    
-    if hasattr(ball_boxes_raw, 'tolist'):
-        ball_boxes = ball_boxes_raw.tolist()
-    elif hasattr(ball_boxes_raw, 'cpu'):
-        ball_boxes = ball_boxes_raw.cpu().tolist()
-    else:
-        ball_boxes = ball_boxes_raw
-    
-    # Check if we have valid boxes
-    if not player_boxes or not ball_boxes:
-        return None
-    
-    # Handle empty lists
-    if len(player_boxes) == 0 or len(ball_boxes) == 0:
-        return None
-    
-    # Get ball center (use first ball detection)
-    first_ball_box = ball_boxes[0]
-    if isinstance(first_ball_box, list):
-        ball_box_list = first_ball_box
-    elif hasattr(first_ball_box, 'tolist'):
-        ball_box_list = first_ball_box.tolist()
-    elif hasattr(first_ball_box, 'cpu'):
-        ball_box_list = first_ball_box.cpu().tolist()
-    else:
-        ball_box_list = first_ball_box
-    
-    ball_center = calculate_center(ball_box_list)
-    if ball_center is None:
-        return None
-    
-    # Find closest player
-    closest_player = None
-    min_distance = float('inf')
-    
-    for i, player_box in enumerate(player_boxes):
-        # Convert box to list format
-        if isinstance(player_box, list):
-            box = player_box
-        elif hasattr(player_box, 'tolist'):
-            box = player_box.tolist()
-        elif hasattr(player_box, 'cpu'):
-            box = player_box.cpu().tolist()
-        else:
-            box = player_box
-        
-        player_center = calculate_center(box)
-        if player_center is None:
-            continue
-        
-        distance = calculate_distance(player_center, ball_center)
-        if distance < min_distance:
-            min_distance = distance
-            closest_player = {
-                'box': box,
-                'index': i,
-                'distance': distance,
-                'center': player_center
-            }
-            
-            # Add mask and score if available
-            masks_raw = player_results.get("masks")
-            if masks_raw is not None:
-                try:
-                    if hasattr(masks_raw, '__getitem__'):
-                        if i < len(masks_raw):
-                            closest_player['mask'] = masks_raw[i]
-                except:
-                    pass
-            
-            scores_raw = player_results.get("scores")
-            if scores_raw is not None:
-                try:
-                    if hasattr(scores_raw, 'tolist'):
-                        scores = scores_raw.tolist()
-                    elif hasattr(scores_raw, 'cpu'):
-                        scores = scores_raw.cpu().tolist()
-                    else:
-                        scores = scores_raw
-                    
-                    if isinstance(scores, list) and i < len(scores):
-                        closest_player['score'] = scores[i]
-                except:
-                    pass
-    
-    return closest_player
+    if isinstance(mask, torch.Tensor):
+        mask = mask.detach().cpu().numpy()
+    # convert to bool
+    if mask.dtype != bool:
+        mask = mask > 0.5
+    return mask
+
+def overlay_mask(base_img, mask, color, alpha):
+    """
+    Overlay a single binary mask onto base_img (PIL.Image) with RGBA color.
+    """
+    mask = to_numpy_mask(mask)
+    if mask is None:
+        return base_img
+
+    rgba = base_img.convert("RGBA")
+    overlay = Image.new("RGBA", base_img.size, (*color, alpha))
+    mask_img = Image.fromarray((mask.astype("uint8") * 255), mode="L")
+    out = Image.composite(overlay, rgba, mask_img)
+    return out
 
 
-def draw_annotations(frame, player_result, ball_result, tracked_player=None, frame_num=0):
-    """
-    Draw annotations on a frame: bounding boxes, masks, labels.
-    
-    Args:
-        frame: PIL Image
-        player_result: SAM3 result for players
-        ball_result: SAM3 result for ball
-        tracked_player: Dict with tracked player info (closest to ball)
-        frame_num: Frame number for display
-    
-    Returns:
-        Annotated PIL Image
-    """
-    # Create a copy to draw on
-    annotated = frame.copy()
-    draw = ImageDraw.Draw(annotated)
-    
-    try:
-        # Try to load a font (fallback to default if not available)
-        try:
-            font = ImageFont.truetype("arial.ttf", 16)
-            font_large = ImageFont.truetype("arial.ttf", 20)
-        except:
-            font = ImageFont.load_default()
-            font_large = ImageFont.load_default()
-        
-        # Draw frame number
-        draw.text((10, 10), f"Frame {frame_num + 1}", fill="white", font=font_large)
-        
-        # Draw ball detections (red)
-        if ball_result.get("boxes") is not None:
-            ball_boxes = ball_result["boxes"]
-            if hasattr(ball_boxes, 'tolist'):
-                ball_boxes = ball_boxes.tolist()
-            elif hasattr(ball_boxes, 'cpu'):
-                ball_boxes = ball_boxes.cpu().tolist()
-            
-            for i, box in enumerate(ball_boxes[:3]):  # Limit to top 3
-                if isinstance(box, list):
-                    bbox = box
-                else:
-                    bbox = box.tolist() if hasattr(box, 'tolist') else box
-                
-                if len(bbox) >= 4:
-                    x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-                    # Draw bounding box
-                    draw.rectangle([x1, y1, x2, y2], outline="red", width=4)
-                    # Draw label with background
-                    label = "Ball"
-                    draw.rectangle([x1, y1 - 25, x1 + 60, y1], fill="red", outline="red")
-                    draw.text((x1 + 5, y1 - 22), label, fill="white", font=font)
-        
-        # Draw all player detections
-        player_boxes_raw = player_result.get("boxes")
-        if player_boxes_raw is not None:
-            # Convert to list safely
-            if hasattr(player_boxes_raw, 'tolist'):
-                player_boxes = player_boxes_raw.tolist()
-            elif hasattr(player_boxes_raw, 'cpu'):
-                player_boxes = player_boxes_raw.cpu().tolist()
-            else:
-                player_boxes = player_boxes_raw
-            
-            if isinstance(player_boxes, list) and len(player_boxes) > 0:
-                for i, box in enumerate(player_boxes[:10]):  # Limit to top 10
-                    # Convert box to list
-                    if isinstance(box, list):
-                        bbox = box
-                    elif hasattr(box, 'tolist'):
-                        bbox = box.tolist()
-                    elif hasattr(box, 'cpu'):
-                        bbox = box.cpu().tolist()
-                    else:
-                        bbox = box
-                
-                if len(bbox) >= 4:
-                    x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-                    
-                    # Highlight tracked player (closest to ball) in green
-                    if tracked_player and tracked_player.get('index') == i:
-                        # Draw thick green box for tracked player
-                        draw.rectangle([x1, y1, x2, y2], outline="green", width=6)
-                        label = f"TRACKED (d={tracked_player['distance']:.0f}px)"
-                        # Draw label with background
-                        text_bbox = draw.textbbox((x1, y1 - 30), label, font=font)
-                        draw.rectangle(text_bbox, fill="green", outline="green")
-                        draw.text((x1 + 3, y1 - 27), label, fill="white", font=font)
-                    else:
-                        # Draw blue box for other players
-                        draw.rectangle([x1, y1, x2, y2], outline="blue", width=2)
-                        label = f"Player {i+1}"
-                        draw.text((x1, y1 - 20), label, fill="blue", font=font)
-        
-        # Draw distance line if tracked player exists
-        if tracked_player:
-            ball_boxes_raw = ball_result.get("boxes")
-            if ball_boxes_raw is not None:
-                # Convert to list safely
-                if hasattr(ball_boxes_raw, 'tolist'):
-                    ball_boxes = ball_boxes_raw.tolist()
-                elif hasattr(ball_boxes_raw, 'cpu'):
-                    ball_boxes = ball_boxes_raw.cpu().tolist()
-                else:
-                    ball_boxes = ball_boxes_raw
-                
-                if isinstance(ball_boxes, list) and len(ball_boxes) > 0:
-                    ball_box = ball_boxes[0]
-                    # Convert box to list
-                    if isinstance(ball_box, list):
-                        ball_bbox = ball_box
-                    elif hasattr(ball_box, 'tolist'):
-                        ball_bbox = ball_box.tolist()
-                    elif hasattr(ball_box, 'cpu'):
-                        ball_bbox = ball_box.cpu().tolist()
-                    else:
-                        ball_bbox = ball_box
-                
-                if len(ball_bbox) >= 4:
-                    ball_center = calculate_center(ball_bbox)
-                    player_center = tracked_player.get('center')
-                    
-                    if ball_center and player_center:
-                        # Draw line between player and ball
-                        draw.line([player_center, ball_center], fill="yellow", width=3)
-                        # Draw distance text with background
-                        mid_x = int((player_center[0] + ball_center[0]) / 2)
-                        mid_y = int((player_center[1] + ball_center[1]) / 2)
-                        dist_text = f"{tracked_player['distance']:.0f}px"
-                        text_bbox = draw.textbbox((mid_x, mid_y), dist_text, font=font)
-                        draw.rectangle(text_bbox, fill="yellow", outline="yellow")
-                        draw.text((mid_x, mid_y), dist_text, fill="black", font=font)
-    
-    except Exception as e:
-        print(f"  ⚠ Warning: Error drawing annotations: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    return annotated
-
+# -------------------------------
+# MAIN
+# -------------------------------
 
 def main():
-    print("=" * 80)
-    print("SAM3 Swing.mov Player Tracking & Video Generation")
-    print("=" * 80)
-    
-    # Load token
-    token = None
-    token = os.environ.get('HF_TOKEN')
-    
+
+    # --------------------------
+    # Load HF token
+    # --------------------------
+    token = os.environ.get("HF_TOKEN")
     if not token:
-        env_local = BASE_DIR / '.env.local'
-        if env_local.exists():
-            print(f"Loading token from: {env_local}")
-            try:
-                with open(env_local, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith('HF_TOKEN='):
-                            token = line.split('=', 1)[1].strip()
-                            token = token.strip('"').strip("'")
-                            os.environ['HF_TOKEN'] = token
-                            print(f"✓ Loaded token from .env.local")
-                            break
-            except Exception as e:
-                print(f"Warning: Could not read .env.local: {e}")
-    
-    if not token:
-        token = get_hf_token()
-    
-    if not token:
-        print("\nERROR: HF_TOKEN not found!")
-        print(f"Please set HF_TOKEN in .env.local or as environment variable")
-        return 1
-    
-    print(f"✓ HF_TOKEN found: {token[:10]}...{token[-4:]}")
-    
-    # Find swing.mov
-    possible_paths = ['swing.mov', 'app/swing.mov', 'media/swing.mov']
-    swing_path = None
-    
-    for path in possible_paths:
-        if os.path.exists(path):
-            swing_path = path
-            break
-    
-    if not swing_path:
-        print(f"\nERROR: swing.mov not found!")
-        print(f"Searched in: {possible_paths}")
-        print("Please place swing.mov in the project root or app/ directory")
-        return 1
-    
-    print(f"✓ Found swing.mov at: {swing_path}")
-    
-    # Extract frames
-    print("\n" + "=" * 80)
-    print("Step 1: Extracting frames from swing.mov...")
-    print("=" * 80)
-    
-    try:
-        frames = extract_frames(swing_path, fps=10, max_frames=None)  # Process all frames
-        print(f"✓ Extracted {len(frames)} frames")
-    except Exception as e:
-        print(f"ERROR extracting frames: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-    
-    # Analyze frames and track player
-    print("\n" + "=" * 80)
-    print("Step 2: Analyzing frames and tracking player closest to ball...")
-    print("=" * 80)
-    
-    results = []
+        raise ValueError("Missing HF_TOKEN")
+
+    # --------------------------
+    # Load model
+    # --------------------------
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("Using device:", device)
+
+    model = Sam3VideoModel.from_pretrained(
+        "facebook/sam3",
+        token=token,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32
+    ).to(device)
+
+    processor = Sam3VideoProcessor.from_pretrained(
+        "facebook/sam3",
+        token=token
+    )
+
+    # --------------------------
+    # Load video frames
+    # --------------------------
+    video_path = BASE_DIR / "swing.mov"
+    frames, fps = load_video(str(video_path))
+    print("Frames:", len(frames), "FPS:", fps)
+
+    # --------------------------
+    # Build SAM3 Video Session
+    # --------------------------
+    session = processor.init_video_session(
+        video=frames,
+        inference_device=device,
+        processing_device="cpu",
+        video_storage_device="cpu",
+        dtype=torch.float16 if device == "cuda" else torch.float32,
+    )
+
+    # two text prompts: player + ball
+    session = processor.add_text_prompt(session, "volleyball player")
+    session = processor.add_text_prompt(session, "volleyball ball")
+
+    # --------------------------
+    # Run SAM3 across video
+    # --------------------------
+    outputs = {}
+    print("Running SAM3 tracking...")
+    for out in model.propagate_in_video_iterator(session):
+        post = processor.postprocess_outputs(session, out)
+        outputs[out.frame_idx] = post
+        print("Processed frame", out.frame_idx + 1)
+
+    # --------------------------
+    # ANALYSIS / VISUALIZATION
+    # --------------------------
+    distances = []        # distance ball ↔ closest player each frame (if both present)
+    ball_positions = []   # centers per frame or None
+    player_positions = [] # matching player centers or None
     annotated_frames = []
-    tracked_player_history = []
-    
-    import time
-    start_time = time.time()
-    
-    for i, frame in enumerate(frames):
-        frame_start = time.time()
-        print(f"\nProcessing frame {i+1}/{len(frames)}...")
-        
-        try:
-            # Detect all players
-            print(f"  → Detecting players...")
-            player_result = segment_image(frame, text_prompt="a volleyball player")
-            
-            # Detect ball
-            print(f"  → Detecting ball...")
-            ball_result = segment_image(frame, text_prompt="a volleyball ball")
-            
-            # Find player closest to ball
-            tracked_player = find_closest_player_to_ball(player_result, ball_result)
-            
-            if tracked_player:
-                print(f"  ✓ Tracked player found: distance={tracked_player['distance']:.1f}px, score={tracked_player.get('score', 'N/A')}")
-                tracked_player_history.append({
-                    'frame': i,
-                    'player': tracked_player,
-                    'ball_detected': ball_result.get("masks") is not None
-                })
-            else:
-                print(f"  ⚠ No tracked player found (no ball or players detected)")
-            
-            # Create annotated frame
-            annotated_frame = draw_annotations(frame, player_result, ball_result, tracked_player, frame_num=i)
-            annotated_frames.append({
-                'frame': i,
-                'image': annotated_frame
-            })
-            
-            # Store results
-            player_detected = player_result.get("masks") is not None
-            ball_detected = ball_result.get("masks") is not None
-            
-            frame_time = time.time() - frame_start
-            print(f"  ⏱ Frame {i+1} processed in {frame_time:.2f}s")
-            
-            results.append({
-                "frame": i,
-                "player_detected": player_detected,
-                "ball_detected": ball_detected,
-                "tracked_player": tracked_player is not None,
-                "player_distance": tracked_player['distance'] if tracked_player else None,
-                "processing_time": frame_time,
-            })
-            
-        except Exception as e:
-            frame_time = time.time() - frame_start
-            print(f"  ✗ ERROR processing frame {i+1} (after {frame_time:.2f}s): {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Use original frame if annotation fails
-            annotated_frames.append({
-                'frame': i,
-                'image': frame
-            })
-            
-            results.append({
-                "frame": i,
-                "error": str(e),
-                "processing_time": frame_time,
-            })
-            
-            # Clear memory on error
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except:
-                pass
-    
-    # Create annotated video
-    print("\n" + "=" * 80)
-    print("Step 3: Creating annotated video...")
-    print("=" * 80)
-    
+
     try:
-        output_video_path = os.path.join(BASE_DIR, "swing_tracked.mp4")
-        print(f"Creating annotated video: {output_video_path}")
-        print(f"  → {len(annotated_frames)} frames to process...")
-        
-        # Get original video FPS
-        cap = cv2.VideoCapture(swing_path)
-        original_fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
-        print(f"  → Using FPS: {original_fps:.2f}")
-        cap.release()
-        
-        create_annotated_video(annotated_frames, output_video_path, fps=original_fps)
-        print(f"✓ Annotated video created successfully!")
-        print(f"  → Output: {output_video_path}")
-        print(f"  → File size: {os.path.getsize(output_video_path) / (1024*1024):.2f} MB")
-    except Exception as e:
-        print(f"✗ ERROR creating video: {e}")
-        import traceback
-        traceback.print_exc()
-        output_video_path = None
-    
-    # Summary
-    total_time = time.time() - start_time
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-    
-    total_frames = len(results)
-    player_detections = sum(1 for r in results if r.get("player_detected", False))
-    ball_detections = sum(1 for r in results if r.get("ball_detected", False))
-    tracked_detections = sum(1 for r in results if r.get("tracked_player", False))
-    successful_frames = sum(1 for r in results if "error" not in r)
-    avg_time = sum(r.get("processing_time", 0) for r in results if "processing_time" in r) / max(successful_frames, 1)
-    
-    print(f"Total frames processed: {total_frames}")
-    print(f"Successful frames: {successful_frames}/{total_frames}")
-    print(f"Total processing time: {total_time:.2f}s")
-    print(f"Average time per frame: {avg_time:.2f}s")
-    if total_frames > 0:
-        print(f"Player detected in: {player_detections}/{total_frames} frames ({player_detections/total_frames*100:.1f}%)")
-        print(f"Ball detected in: {ball_detections}/{total_frames} frames ({ball_detections/total_frames*100:.1f}%)")
-        print(f"Tracked player (closest to ball) found in: {tracked_detections}/{total_frames} frames ({tracked_detections/total_frames*100:.1f}%)")
-    
-    if tracked_player_history:
-        avg_distance = np.mean([t['player']['distance'] for t in tracked_player_history])
-        min_distance = min([t['player']['distance'] for t in tracked_player_history])
-        print(f"\nTracking Statistics:")
-        print(f"  Average distance to ball: {avg_distance:.1f}px")
-        print(f"  Minimum distance to ball: {min_distance:.1f}px")
-        print(f"  Frames with ball contact: {sum(1 for t in tracked_player_history if t['ball_detected'] and t['player']['distance'] < 100)}")
-    
-    if output_video_path and os.path.exists(output_video_path):
-        print(f"\n✓ Output video saved: {output_video_path}")
-        print(f"  → You can now view the tracked player visualization!")
+        font = ImageFont.truetype("arial.ttf", 22)
+    except:
+        font = ImageFont.load_default()
+
+    last_ball_center = None
+
+    for i, frame in enumerate(frames):
+        det = outputs.get(i, {})
+        boxes = det.get("boxes", [])
+        masks = det.get("masks", [])
+        labels = det.get("text_prompts", [])
+
+        # Normalize to Python lists
+        if isinstance(boxes, torch.Tensor):
+            boxes = boxes.detach().cpu().tolist()
+        if isinstance(masks, torch.Tensor):
+            masks = list(masks.detach().cpu())
+
+        img = Image.fromarray(frame).convert("RGBA")
+
+        # separate detections by type
+        ball_indices = []
+        player_indices = []
+
+        for idx, label in enumerate(labels):
+            label_l = str(label).lower()
+            if "ball" in label_l:
+                ball_indices.append(idx)
+            else:
+                player_indices.append(idx)
+
+        # ---------- choose best ball detection (closest to last_ball_center) ----------
+        chosen_ball_idx = None
+        ball_center = None
+        ball_box = None
+
+        if ball_indices:
+            if last_ball_center is None or len(ball_indices) == 1:
+                chosen_ball_idx = ball_indices[0]
+            else:
+                # pick ball box whose center is closest to previous ball position
+                min_prev_d = float("inf")
+                best_idx = None
+                for idx in ball_indices:
+                    b = boxes[idx]
+                    c = center_of_box(b)
+                    d = euclidean(c, last_ball_center)
+                    if d < min_prev_d:
+                        min_prev_d = d
+                        best_idx = idx
+                chosen_ball_idx = best_idx
+
+            ball_box = boxes[chosen_ball_idx]
+            ball_center = center_of_box(ball_box)
+            last_ball_center = ball_center
+
+        # ---------- overlay masks ----------
+        # players: different colors
+        for j, p_idx in enumerate(player_indices):
+            if p_idx < len(masks):
+                color = PLAYER_COLORS[j % len(PLAYER_COLORS)]
+                img = overlay_mask(img, masks[p_idx], color, PLAYER_ALPHA)
+
+        # ball: single distinct color
+        if chosen_ball_idx is not None and chosen_ball_idx < len(masks):
+            img = overlay_mask(img, masks[chosen_ball_idx], BALL_COLOR, BALL_ALPHA)
+
+        # convert back to RGB for drawing lines/text
+        img_rgb = img.convert("RGB")
+        draw = ImageDraw.Draw(img_rgb)
+
+        # ---------- tracking: closest player to ball ----------
+        tracked_player_center = None
+        tracked_player_box = None
+        frame_distance = None
+
+        if ball_center is not None and player_indices:
+            min_d = float("inf")
+            best_box = None
+            best_center = None
+
+            for j, p_idx in enumerate(player_indices):
+                pb = boxes[p_idx]
+                pc = center_of_box(pb)
+                d = euclidean(pc, ball_center)
+                if d < min_d:
+                    min_d = d
+                    best_box = pb
+                    best_center = pc
+
+            frame_distance = min_d
+            tracked_player_box = best_box
+            tracked_player_center = best_center
+
+            # only count as "touch" if within threshold
+            if frame_distance <= TOUCH_DISTANCE_PX:
+                distances.append(frame_distance)
+                ball_positions.append(ball_center)
+                player_positions.append(tracked_player_center)
+            else:
+                distances.append(None)
+                ball_positions.append(None)
+                player_positions.append(None)
+        else:
+            distances.append(None)
+            ball_positions.append(None)
+            player_positions.append(None)
+
+        # ---------- draw boxes + line for visualization ----------
+        if ball_box is not None:
+            draw_box(draw, ball_box, BALL_COLOR, "BALL", font)
+
+        if tracked_player_box is not None:
+            color = (0, 255, 0) if (
+                frame_distance is not None and frame_distance <= TOUCH_DISTANCE_PX
+            ) else (0, 128, 255)
+            label = "PLAYER (touch)" if (
+                frame_distance is not None and frame_distance <= TOUCH_DISTANCE_PX
+            ) else "PLAYER"
+            draw_box(draw, tracked_player_box, color, label, font)
+
+            if ball_center is not None:
+                draw.line([ball_center, tracked_player_center],
+                          fill="yellow", width=3)
+                if frame_distance is not None:
+                    txt = f"{frame_distance:.1f}px"
+                    draw.text(ball_center, txt, fill="yellow", font=font)
+
+        annotated_frames.append(img_rgb)
+
+    # --------------------------
+    # LAST TOUCH (minimum distance frame)
+    # --------------------------
+    # consider only frames where we had a valid touch (distance not None)
+    valid_idxs = [idx for idx, d in enumerate(distances) if d is not None]
+    if not valid_idxs:
+        print("No valid touch frames found (ball never within threshold).")
+        last_touch_frame = None
     else:
-        print(f"\n⚠ Output video was not created")
-    
-    print("=" * 80)
-    print("Analysis complete!")
-    print("=" * 80)
-    
-    return 0
+        best_idx = min(valid_idxs, key=lambda idx: distances[idx])
+        last_touch_frame = best_idx
+        print("Last touch frame (min distance within threshold):", last_touch_frame)
+
+    # --------------------------
+    # Convert px → cm using ball width at last-touch frame
+    # --------------------------
+    if last_touch_frame is not None:
+        det_last = outputs[last_touch_frame]
+        boxes_last = det_last.get("boxes", [])
+        labels_last = det_last.get("text_prompts", [])
+        # find ball box in that frame
+        ball_idx_last = None
+        for idx, lbl in enumerate(labels_last):
+            if "ball" in str(lbl).lower():
+                ball_idx_last = idx
+                break
+
+        if ball_idx_last is not None:
+            ball_box_px = boxes_last[ball_idx_last]
+            ball_width_px = ball_box_px[2] - ball_box_px[0]
+
+            REAL_BALL_DIAMETER_CM = 21
+            cm_per_px = REAL_BALL_DIAMETER_CM / ball_width_px
+            print("cm per px =", cm_per_px)
+
+            # --------------------------
+            # JUMP HEIGHT (vertical)
+            # --------------------------
+            # use only frames with valid player position
+            valid_player_ys = [p[1] for p in player_positions if p is not None]
+            if valid_player_ys:
+                jump_height_px = max(valid_player_ys) - min(valid_player_ys)
+                jump_height_cm = jump_height_px * cm_per_px
+                print("Estimated jump height:", round(jump_height_cm, 1), "cm")
+
+            # --------------------------
+            # Ball speed estimation
+            # --------------------------
+            valid_ball_centers = [b for b in ball_positions if b is not None]
+            speeds = []
+            for k in range(1, len(valid_ball_centers)):
+                d = euclidean(valid_ball_centers[k], valid_ball_centers[k-1])
+                speed_cm_s = (d * cm_per_px) * fps
+                speeds.append(speed_cm_s)
+
+            if speeds:
+                avg_speed = np.mean(speeds)
+                print("Estimated ball speed:", round(avg_speed, 1), "cm/s")
+        else:
+            print("Could not find ball box on last-touch frame; skipping cm conversion.")
+    else:
+        print("No last-touch frame; skipping jump height / speed.")
+
+    # --------------------------
+    # Save annotated video
+    # --------------------------
+    clip = ImageSequenceClip([np.array(f) for f in annotated_frames], fps=fps)
+    out_path = BASE_DIR / "swing_sam3.mp4"
+    clip.write_videofile(str(out_path), codec="libx264")
+
+    print("Saved:", out_path)
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    main()
