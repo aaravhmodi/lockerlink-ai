@@ -92,9 +92,9 @@ def find_player_closest_to_ball(
 
 def analyze_volleyball_video(
     frames: List[Image.Image],
-    image_model: Any,
-    image_processor: Any,
-    video_model: Any,
+    image_model: Any = None,  # Not used with Inference API
+    image_processor: Any = None,  # Not used with Inference API
+    video_model: Any = None,  # Not used with Inference API
     analysis_type: str = "full"
 ) -> Dict[str, Any]:
     """
@@ -145,8 +145,6 @@ def analyze_volleyball_video(
                 console_log(f"Frame {frame_idx}: Detecting players...")
                 detection_start = time.time()
                 player_result = segment_image(
-                    image_model,
-                    image_processor,
                     frame,
                     text_prompt="a volleyball player"
                 )
@@ -181,8 +179,6 @@ def analyze_volleyball_video(
                 console_log(f"Frame {frame_idx}: Detecting ball...")
                 detection_start = time.time()
                 ball_result = segment_image(
-                    image_model,
-                    image_processor,
                     frame,
                     text_prompt="a volleyball ball"
                 )

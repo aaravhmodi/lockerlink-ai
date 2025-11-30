@@ -1,347 +1,228 @@
 """
-SAM3 model loading and inference functions.
-Handles both image and video segmentation using the official SAM3 API.
+SAM3 inference using HuggingFace Transformers library.
+Uses local model loading via transformers library.
 """
 
 import os
 import logging
-from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
 import torch
+from typing import Dict, Any, Optional
 from PIL import Image
-
-# SAM3 imports using HuggingFace Transformers
-# This requires: pip install transformers accelerate
-# And authentication: huggingface-cli login
-try:
-    from transformers import pipeline, AutoModel
-except ImportError as e:
-    logging.error(f"Transformers imports failed. Make sure to run: pip install transformers accelerate")
-    logging.error(f"Import error: {e}")
-    raise
 
 logger = logging.getLogger(__name__)
 
-# Get HuggingFace token from environment or Django settings
-def get_hf_token():
-    """Get HuggingFace token from environment or settings."""
+# Global model and processor cache
+_sam3_model = None
+_sam3_processor = None
+_device = None
+
+
+def get_hf_token() -> Optional[str]:
+    """Get HuggingFace token from environment."""
     token = os.environ.get('HF_TOKEN')
     if not token:
         try:
-            from django.conf import settings
-            token = getattr(settings, 'HF_TOKEN', None)
-        except:
+            from dotenv import load_dotenv
+            from pathlib import Path
+            BASE_DIR = Path(__file__).resolve().parent.parent
+            load_dotenv(dotenv_path=BASE_DIR / '.env.local')
+            load_dotenv(dotenv_path=BASE_DIR / '.env')
+            token = os.environ.get('HF_TOKEN')
+        except ImportError:
             pass
     return token
 
-# Global model cache
-_image_model = None
-_image_processor = None
-_video_model = None
 
-# Paths
-SAM3_WEIGHTS_DIR = Path("models/sam3_weights")
-SAM3_REPO_DIR = Path("sam3")
-
-
-def get_device() -> torch.device:
+def get_device():
     """Get the appropriate device (CUDA if available, else CPU)."""
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-        logger.info(f"CUDA version: {torch.version.cuda}")
-    else:
-        device = torch.device("cpu")
-        logger.warning("CUDA not available, using CPU (performance will be limited)")
-    return device
+    global _device
+    if _device is None:
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using device: {_device}")
+    return _device
 
 
-def find_checkpoint_path(model_type: str = "image") -> Optional[Path]:
+def load_sam3_image_model():
     """
-    Find SAM3 checkpoint file in models/sam3_weights/.
-    
-    Args:
-        model_type: "image" or "video"
-    
-    Returns:
-        Path to checkpoint file or None if not found
+    Load SAM3 model and processor for image segmentation.
+    Uses caching to avoid reloading on every call.
     """
-    if not SAM3_WEIGHTS_DIR.exists():
-        logger.warning(f"Checkpoints directory not found: {SAM3_WEIGHTS_DIR}")
-        logger.warning("Please download SAM3 weights from HuggingFace and place in models/sam3_weights/")
-        return None
+    global _sam3_model, _sam3_processor
     
-    # Look for common checkpoint file patterns
-    checkpoint_patterns = [
-        f"sam3_{model_type}*.pth",
-        f"sam3-{model_type}*.pth",
-        f"*{model_type}*.pth",
-        "*.pth",
-        "*.pt",
-        "*.ckpt"
-    ]
-    
-    for pattern in checkpoint_patterns:
-        matches = list(SAM3_WEIGHTS_DIR.glob(pattern))
-        if matches:
-            checkpoint_path = matches[0]
-            logger.info(f"Found checkpoint: {checkpoint_path}")
-            return checkpoint_path
-    
-    logger.warning(f"No checkpoint found in {SAM3_WEIGHTS_DIR}")
-    logger.warning("Please download SAM3 weights from HuggingFace and place in models/sam3_weights/")
-    return None
-
-
-def load_sam3_image_model(checkpoint_path: Optional[str] = None) -> Tuple[Any, Any]:
-    """
-    Load SAM3 image model using HuggingFace Transformers.
-    
-    This automatically handles authentication and downloads from HuggingFace.
-    Requires: huggingface-cli login (or HF_TOKEN environment variable)
-    
-    Args:
-        checkpoint_path: Optional path to local checkpoint file.
-                       If None, model will auto-download from HuggingFace.
-    
-    Returns:
-        Tuple of (model, processor)
-    """
-    global _image_model, _image_processor
-    
-    # Return cached model if already loaded
-    if _image_model is not None and _image_processor is not None:
-        logger.info("Using cached SAM3 image model")
-        return _image_model, _image_processor
+    if _sam3_model is not None and _sam3_processor is not None:
+        return _sam3_model, _sam3_processor
     
     try:
+        from transformers import Sam3Model, Sam3Processor
+        
+        logger.info("Loading SAM3 model and processor...")
         device = get_device()
         
-        logger.info("Loading SAM3 image model from HuggingFace (facebook/sam3)...")
-        
-        # Get token for authentication
+        # Set HF token for authentication
         token = get_hf_token()
         if token:
-            logger.debug("Using HuggingFace token for authentication")
             os.environ['HF_TOKEN'] = token
         
-        # Use pipeline approach for SAM3 (recommended by HuggingFace)
-        # Pipeline handles both model and processor automatically
-        try:
-            _image_processor = pipeline("mask-generation", model="facebook/sam3", device=device, token=token)
-            _image_model = _image_processor.model  # Extract model from pipeline
-            logger.info("Loaded SAM3 using pipeline approach")
-        except Exception as pipeline_error:
-            logger.warning(f"Pipeline approach failed: {pipeline_error}")
-            logger.info("Falling back to direct AutoModel loading...")
-            # Fallback: Try loading model directly (may not work without processor)
-            from transformers import AutoImageProcessor
-            _image_processor = AutoImageProcessor.from_pretrained("facebook/sam3", token=token)
-            _image_model = AutoModel.from_pretrained("facebook/sam3", token=token).to(device)
-            _image_model.eval()
+        # Load model and processor
+        model = Sam3Model.from_pretrained("facebook/sam3", token=token).to(device)
+        processor = Sam3Processor.from_pretrained("facebook/sam3", token=token)
         
-        logger.info(f"SAM3 image model loaded successfully on {device}")
-        return _image_model, _image_processor
+        model.eval()  # Set to evaluation mode
+        
+        # Cache for reuse
+        _sam3_model = model
+        _sam3_processor = processor
+        
+        logger.info(f"SAM3 model loaded successfully on {device}")
+        return model, processor
         
     except Exception as e:
-        logger.error(f"Failed to load SAM3 image model: {e}", exc_info=True)
-        raise
+        logger.error(f"Failed to load SAM3 model: {e}", exc_info=True)
+        raise Exception(f"Failed to load SAM3 model: {str(e)}")
 
 
 def segment_image(
-    model: Any,
-    processor: Any,
     image: Image.Image,
-    text_prompt: Optional[str] = None,
+    text_prompt: str = "a volleyball player",
     point_prompts: Optional[list] = None,
     box_prompt: Optional[list] = None
 ) -> Dict[str, Any]:
     """
-    Run SAM3 inference on an image using HuggingFace Transformers API.
+    Run SAM3 segmentation using HuggingFace Transformers.
     
     Args:
-        model: SAM3Model from transformers (can be None, will use global cache)
-        processor: Sam3Processor from transformers (can be None, will use global cache)
         image: PIL Image to segment
-        text_prompt: Optional text prompt (e.g., "a volleyball player")
+        text_prompt: Text prompt (e.g., "a volleyball player")
         point_prompts: Optional list of (x, y) point coordinates
         box_prompt: Optional bounding box [x1, y1, x2, y2] in xyxy format
     
     Returns:
         Dictionary with masks, boxes, scores
     """
-    global _image_model, _image_processor
-    
-    # Use global cache if not provided
-    if model is None:
-        model = _image_model
-    if processor is None:
-        processor = _image_processor
-    
-    if model is None or processor is None:
-        raise ValueError("SAM3 model not loaded. Call load_sam3_image_model() first.")
-    
     try:
-        # Check if processor is a pipeline (from pipeline approach)
-        if hasattr(processor, '__call__') and hasattr(processor, 'model'):
-            # Pipeline approach - use it directly
-            prompt = text_prompt or "a volleyball player"
-            results = processor(image, text=prompt)
-            
-            # Pipeline returns list of masks
-            if isinstance(results, dict) and 'masks' in results:
-                masks = results['masks']
-                return {
-                    "masks": masks,
-                    "boxes": results.get("boxes"),
-                    "scores": results.get("scores"),
-                }
-            elif isinstance(results, list):
-                # Pipeline may return list of masks
-                return {
-                    "masks": results,
-                    "boxes": None,
-                    "scores": None,
-                }
-            else:
-                return {
-                    "masks": results,
-                    "boxes": None,
-                    "scores": None,
-                }
+        # Load model if not already loaded
+        model, processor = load_sam3_image_model()
+        device = get_device()
         
-        # Fallback: Direct model/processor approach
-        device = next(model.parameters()).device
+        logger.debug(f"Segmenting image with text prompt: '{text_prompt}'")
+        
+        # Clear any cached tensors before processing
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Prepare inputs based on prompt type
-        if text_prompt:
-            inputs = processor(images=image, text=text_prompt, return_tensors="pt").to(device)
-        elif box_prompt:
-            input_boxes = [[box_prompt]]
-            input_boxes_labels = [[1]]
-            inputs = processor(
-                images=image,
-                input_boxes=input_boxes,
-                input_boxes_labels=input_boxes_labels,
-                return_tensors="pt"
-            ).to(device)
-        elif point_prompts:
-            input_points = [[[point_prompts]]]
-            input_labels = [[[1] * len(point_prompts)]]
-            inputs = processor(
-                images=image,
-                input_points=input_points,
-                input_labels=input_labels,
-                return_tensors="pt"
-            ).to(device)
-        else:
-            inputs = processor(images=image, text="a volleyball player", return_tensors="pt").to(device)
+        try:
+            if box_prompt:
+                # Bounding box input
+                input_boxes = [[box_prompt]]  # [batch, num_boxes, 4] in xyxy format
+                input_boxes_labels = [[1]]  # 1 = positive box
+                inputs = processor(
+                    images=image,
+                    input_boxes=input_boxes,
+                    input_boxes_labels=input_boxes_labels,
+                    return_tensors="pt"
+                ).to(device)
+            elif point_prompts:
+                # Point prompts
+                input_points = [[[point_prompts]]]  # [batch, object, point, coord]
+                input_labels = [[[1] * len(point_prompts)]]  # All positive
+                inputs = processor(
+                    images=image,
+                    input_points=input_points,
+                    input_labels=input_labels,
+                    return_tensors="pt"
+                ).to(device)
+            else:
+                # Text prompt (default)
+                inputs = processor(
+                    images=image,
+                    text=text_prompt,
+                    return_tensors="pt"
+                ).to(device)
+        except Exception as e:
+            logger.error(f"Error preparing inputs: {e}", exc_info=True)
+            raise Exception(f"Failed to prepare inputs: {str(e)}")
         
-        # Run inference
+        # Run inference with memory management
         with torch.no_grad():
-            outputs = model(**inputs)
+            try:
+                outputs = model(**inputs)
+            except RuntimeError as e:
+                error_str = str(e).lower()
+                if "out of memory" in error_str or "cuda" in error_str:
+                    # Clear cache and try again
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    logger.warning(f"Memory error detected, clearing cache: {e}")
+                    # Try with smaller image or retry
+                    try:
+                        outputs = model(**inputs)
+                    except RuntimeError as e2:
+                        logger.error(f"Retry also failed: {e2}")
+                        raise Exception(f"Out of memory error: {str(e2)}")
+                else:
+                    logger.error(f"Runtime error during inference: {e}", exc_info=True)
+                    raise Exception(f"Model inference error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error during inference: {e}", exc_info=True)
+                raise
         
-        # Extract results
-        masks = getattr(outputs, 'pred_masks', None) or getattr(outputs, 'masks', None)
-        boxes = getattr(outputs, 'pred_boxes', None) or getattr(outputs, 'boxes', None)
-        scores = getattr(outputs, 'scores', None)
-        
-        return {
-            "masks": masks,
-            "boxes": boxes,
-            "scores": scores,
-        }
-        
-    except Exception as e:
-        logger.error(f"Error during image segmentation: {e}", exc_info=True)
-        raise
-
-
-def load_sam3_video_model(checkpoint_path: Optional[str] = None) -> Any:
-    """
-    Load SAM3 video model using HuggingFace Transformers.
-    
-    This automatically handles authentication and downloads from HuggingFace.
-    Requires: huggingface-cli login (or HF_TOKEN environment variable)
-    
-    Args:
-        checkpoint_path: Optional path to local checkpoint file.
-                       If None, model will auto-download from HuggingFace.
-    
-    Returns:
-        Tuple of (model, processor) for video processing
-    """
-    global _video_model
-    
-    # Return cached model if already loaded
-    if _video_model is not None:
-        logger.info("Using cached SAM3 video model")
-        return _video_model
-    
-    try:
-        device = get_device()
-
-        logger.info("Loading SAM3 video model from HuggingFace (facebook/sam3)...")
-        
-        # Get token for authentication
-        token = get_hf_token()
-        if token:
-            logger.debug("Using HuggingFace token for authentication")
-            os.environ['HF_TOKEN'] = token
-
-        # Load video model using HuggingFace Transformers AutoModel
-        # Use bfloat16 for video models (better performance)
-        _video_model = AutoModel.from_pretrained(
-            "facebook/sam3",
-            token=token
-        ).to(device, dtype=torch.bfloat16)
-        _video_model.eval()
-        
-        logger.info(f"SAM3 video model loaded successfully on {device}")
-        return _video_model
+        # Post-process results
+        try:
+            results = processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.5,
+                mask_threshold=0.5,
+                target_sizes=inputs.get("original_sizes").tolist()
+            )[0]
+            
+            num_objects = len(results["masks"]) if results.get("masks") is not None else 0
+            logger.debug(f"Found {num_objects} objects")
+            
+            # Clear intermediate tensors to free memory
+            del outputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            return {
+                "masks": results["masks"],  # Tensor of masks
+                "boxes": results["boxes"],   # Tensor of bounding boxes (xyxy format)
+                "scores": results["scores"], # Tensor of confidence scores
+            }
+        except Exception as e:
+            logger.error(f"Error post-processing results: {e}", exc_info=True)
+            # Clear memory on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            raise Exception(f"Failed to post-process results: {str(e)}")
         
     except Exception as e:
-        logger.error(f"Failed to load SAM3 video model: {e}", exc_info=True)
-        raise
+        logger.error(f"Error in segment_image: {e}", exc_info=True)
+        raise Exception(f"Failed to segment image: {str(e)}")
 
 
 def segment_video_frame(
-    video_model: Any,
     frame: Image.Image,
-    text_prompt: Optional[str] = None
+    text_prompt: str = "a volleyball player"
 ) -> Dict[str, Any]:
     """
     Run SAM3 inference on a single video frame.
     
     Args:
-        video_model: SAM3 video predictor model
         frame: PIL Image frame to segment
         text_prompt: Optional text prompt
     
     Returns:
         Dictionary with masks, boxes, scores for the frame
     """
-    if video_model is None:
-        raise ValueError("SAM3 video model not loaded. Call load_sam3_video_model() first.")
-    
-    try:
-        # SAM3 video API may differ - check official documentation
-        # This is a placeholder based on typical video segmentation APIs
-        # Adjust based on actual SAM3 video API from the repo
-        
-        # Convert PIL Image to tensor if needed
-        # The exact API depends on SAM3 video predictor implementation
-        output = video_model.predict(frame, text_prompt=text_prompt or "a volleyball player")
-        
-        result = {
-            "masks": output.masks if hasattr(output, 'masks') else None,
-            "boxes": output.boxes if hasattr(output, 'boxes') else None,
-            "scores": output.scores if hasattr(output, 'scores') else None,
-        }
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error during video frame segmentation: {e}", exc_info=True)
-        raise
+    # Video frames are just images - use the same function
+    return segment_image(frame, text_prompt=text_prompt)
 
+
+def load_sam3_video_model():
+    """
+    Load SAM3 video model (for future use if needed).
+    Currently not implemented - using image model for frames.
+    """
+    logger.warning("load_sam3_video_model() - video model not yet implemented, using image model")
+    return load_sam3_image_model()

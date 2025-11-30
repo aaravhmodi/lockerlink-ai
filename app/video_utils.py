@@ -8,7 +8,7 @@ import tempfile
 import logging
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 import cv2
 import requests
 from PIL import Image

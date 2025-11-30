@@ -1,296 +1,180 @@
-# LockerLink AI - Volleyball Video Analysis Microservice
+# LockerLink AI - Volleyball Video Analysis
 
-A Python microservice using FastAPI, PyTorch, and SAM3 (Segment Anything Model 3) for analyzing volleyball highlight videos. The service segments players and balls to provide metrics like vertical jump, ball touch, approach speed, kill accuracy, and more.
+FastAPI microservice for analyzing volleyball highlight videos using SAM3 via HuggingFace Inference API.
 
-## Requirements
+## Features
 
-- Python 3.12+
-- PyTorch 2.7.0+ with CUDA 12.6+ support
-- CUDA-capable GPU (recommended for performance)
-- SAM3 model weights from HuggingFace
+- 🎥 Video analysis with player and ball tracking
+- 📊 Metrics: vertical jump, hang time, touch point, action type
+- 🎬 Annotated video output showing tracked objects
+- 🚀 Serverless-ready (no GPU needed)
+- ⚡ Fast inference via HuggingFace API
+
+## Quick Start
+
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Set HuggingFace Token
+
+Create `.env.local` file:
+
+```bash
+HF_TOKEN=your_huggingface_token_here
+```
+
+Get your token from: https://huggingface.co/settings/tokens
+
+### 3. Run the Server
+
+```bash
+python run.py
+```
+
+Or with uvicorn:
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+### 4. Test It
+
+Open in browser:
+- `http://localhost:8000/` - Service info
+- `http://localhost:8000/docs` - Interactive API docs
+- `http://localhost:8000/test` - Test SAM3
+
+## API Endpoints
+
+### `GET /`
+Service information
+
+### `GET /health`
+Health check
+
+### `GET /test`
+Test SAM3 on sample image
+
+### `POST /test/swing`
+Analyze swing.mov file (if present)
+
+### `POST /analyze/video`
+Analyze video from URL
+
+**Request:**
+```json
+{
+  "video_url": "https://example.com/video.mp4",
+  "highlight_id": "optional_id",
+  "user_id": "optional_user_id",
+  "analysis_type": "full"
+}
+```
+
+### `POST /upload`
+Upload and analyze video file
+
+**Form data:**
+- `video`: Video file
+- `analysis_type`: "full" (optional)
+
+### `POST /analyze/batch`
+Analyze multiple videos
+
+**Request:**
+```json
+{
+  "video_urls": [
+    "https://example.com/video1.mp4",
+    "https://example.com/video2.mp4"
+  ]
+}
+```
+
+## Response Format
+
+```json
+{
+  "status": "success",
+  "analysis": {
+    "frames_analyzed": 100,
+    "player_detected": true,
+    "ball_detected": true,
+    "action_type": "kill",
+    "jump_start_frame": 10,
+    "jump_peak_frame": 15,
+    "jump_end_frame": 20,
+    "touch_frame": 16
+  },
+  "metrics": {
+    "vertical_jump": 28.5,
+    "hang_time": 0.5,
+    "touch_point": {
+      "frame": 16,
+      "timestamp": 1.6
+    },
+    "ball_touch_detected": true,
+    "action_type": "kill"
+  },
+  "annotated_video": "data:video/mp4;base64,...",
+  "annotated_frames": [...],
+  "debug_info": {...}
+}
+```
+
+## Architecture
+
+- **FastAPI** - Web framework
+- **HuggingFace Inference API** - SAM3 model (no local models needed)
+- **OpenCV** - Video processing
+- **PIL** - Image handling
+
+## Deployment
+
+### Docker
+
+```bash
+docker build -t lockerlink-ai .
+docker run -p 8000:8000 -e HF_TOKEN=your_token lockerlink-ai
+```
+
+### Serverless Platforms
+
+Works on:
+- Vercel
+- Fly.io
+- Render
+- Railway
+- Firebase Functions
+- AWS Lambda
+
+No GPU required - all inference via HuggingFace API!
+
+## Environment Variables
+
+- `HF_TOKEN` - HuggingFace API token (required)
 
 ## Project Structure
 
 ```
 lockerlink-ai/
 ├── app/
-│   ├── __init__.py
-│   ├── sam3_inference.py    # SAM3 model loading and inference
-│   ├── video_utils.py       # Video download and frame extraction
-│   └── analysis_utils.py    # Volleyball metrics calculation
-├── api/
-│   ├── __init__.py
-│   ├── views.py             # Django API views
-│   └── urls.py              # URL routing
-├── lockerlink_ai/
-│   ├── settings.py          # Django settings
-│   ├── urls.py              # Main URL configuration
-│   └── wsgi.py              # WSGI configuration
-├── main.py                  # Simple entry point: python main.py runserver
-├── manage.py                # Django management script
-├── models/
-│   └── sam3_weights/        # SAM3 checkpoints (manually downloaded)
-├── sam3/                    # SAM3 repository (cloned from GitHub)
+│   ├── main.py              # FastAPI application
+│   ├── sam3_inference.py    # HuggingFace API calls
+│   ├── video_utils.py       # Video processing
+│   └── analysis_utils.py    # Volleyball metrics
+├── run.py                   # Server entry point
 ├── requirements.txt
 ├── Dockerfile
-└── README.md
+└── .env.local               # Your HF_TOKEN (not in git)
 ```
 
-## Setup Instructions
-
-**We use HuggingFace Transformers to load SAM3** - no need to clone the SAM3 repo!
-
-### 1. Authenticate with HuggingFace
-
-Since you have access to SAM3, authenticate to enable auto-download:
-
-```bash
-pip install huggingface_hub
-huggingface-cli login
-```
-
-Enter your HuggingFace access token (get it from https://huggingface.co/settings/tokens)
-
-**Note**: The model will automatically download from HuggingFace on first use. No manual download needed!
-
-#### Option A: Standard Installation (with CUDA)
-
-```bash
-# Install PyTorch with CUDA 12.6 support
-pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
-
-# Install all dependencies (includes transformers for SAM3)
-pip install -r requirements.txt
-```
-
-#### Option B: CPU-only Installation (not recommended for production)
-
-```bash
-pip install torch==2.7.0 torchvision torchaudio
-pip install -r requirements.txt
-```
-
-**Note**: CPU mode will be significantly slower. CUDA 12.6+ is required for optimal SAM3 performance.
-
-### 3. Create Test Image (Optional)
-
-Place a test image at `app/test_image.jpg` for the `/test` endpoint. If not present, a placeholder will be created automatically.
-
-## Running the Service
-
-### Development Mode
-
-```bash
-python main.py runserver
-```
-
-Or with custom host/port:
-
-```bash
-python main.py runserver 0.0.0.0:8000
-```
-
-### Production Mode
-
-For production, use a proper WSGI server:
-
-```bash
-# Using gunicorn (install with: pip install gunicorn)
-gunicorn lockerlink_ai.wsgi:application --bind 0.0.0.0:8000
-```
-
-The service will be available at `http://localhost:8000`
-
-## API Endpoints
-
-### GET `/`
-
-Root endpoint returning service information.
-
-**Response:**
-```json
-{
-  "service": "LockerLink AI",
-  "status": "running",
-  "version": "1.0.0"
-}
-```
-
-### GET `/test`
-
-Test endpoint that runs SAM3 inference on a sample image.
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "num_masks": 1,
-  "message": "SAM3 inference successful"
-}
-```
-
-**Usage:**
-```bash
-curl http://localhost:8000/test
-```
-
-### GET `/health`
-
-Health check endpoint.
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "model_loaded": true
-}
-```
-
-## Docker Deployment
-
-### Prerequisites
-
-1. Ensure SAM3 repository is cloned in `sam3/` directory
-2. Ensure SAM3 weights are downloaded in `models/sam3_weights/`
-3. Docker with NVIDIA Container Toolkit installed for CUDA support
-
-### Build Docker Image
-
-```bash
-docker build -t lockerlink-ai:latest .
-```
-
-### Run Docker Container
-
-```bash
-# With GPU support
-docker run --gpus all -p 8000:8000 lockerlink-ai:latest
-
-# Or with specific GPU
-docker run --gpus device=0 -p 8000:8000 lockerlink-ai:latest
-```
-
-### Docker Compose (Optional)
-
-Create a `docker-compose.yml`:
-
-```yaml
-version: '3.8'
-
-services:
-  lockerlink-ai:
-    build: .
-    ports:
-      - "8000:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    volumes:
-      - ./models/sam3_weights:/app/models/sam3_weights
-```
-
-## Usage Examples
-
-### Testing the Service
-
-```bash
-# Test endpoint
-curl http://localhost:8000/test
-
-# Health check
-curl http://localhost:8000/health
-```
-
-### Using the Python API
-
-```python
-from app.sam3_inference import load_sam3_image_model, segment_image
-from app.video_utils import download_video, extract_frames
-from PIL import Image
-
-# Load model
-model, processor = load_sam3_image_model()
-
-# Segment an image
-image = Image.open("path/to/image.jpg")
-result = segment_image(model, processor, image, text_prompt="a volleyball player")
-
-# Download and process video
-video_path = download_video("https://example.com/video.mp4")
-frames = extract_frames(video_path, fps=10)
-
-# Process each frame
-for frame in frames:
-    result = segment_image(model, processor, frame, text_prompt="a volleyball player")
-```
-
-## CUDA Compatibility
-
-- **Required**: CUDA 12.6+
-- **PyTorch**: 2.7.0+ with CUDA support
-- **GPU**: NVIDIA GPU with CUDA compute capability 7.0+
-
-The service will automatically detect and use CUDA if available. If CUDA is not available, it will fall back to CPU (with significantly reduced performance).
-
-## Troubleshooting
-
-### SAM3 Import Errors
-
-If you see import errors for SAM3:
-
-```bash
-# Ensure SAM3 is cloned
-ls sam3/
-
-# Reinstall SAM3
-pip install -e ./sam3
-```
-
-### Checkpoint Not Found
-
-If the model fails to load:
-
-1. Verify checkpoints are in `models/sam3_weights/`
-2. Check checkpoint filenames match expected patterns
-3. Ensure you have access to the HuggingFace repository
-
-### CUDA Errors
-
-If CUDA is not detected:
-
-1. Verify CUDA 12.6+ is installed: `nvcc --version`
-2. Verify PyTorch CUDA support: `python -c "import torch; print(torch.cuda.is_available())"`
-3. Check GPU is accessible: `nvidia-smi`
-
-## Development
-
-### Adding New Endpoints
-
-Add new endpoints in `app/main.py` following the FastAPI pattern:
-
-```python
-@app.post("/analyze")
-async def analyze_video(video_url: str):
-    # Your analysis logic
-    pass
-```
-
-### Extending SAM3 Inference
-
-Modify `app/sam3_inference.py` to add custom segmentation functions or integrate with video processing pipelines.
-
-## License
-
-This project is part of the LockerLink ecosystem. SAM3 is licensed under Apache 2.0 (see SAM3 repository for details).
-
-## References
-
-- [SAM3 GitHub Repository](https://github.com/facebookresearch/sam3)
-- [SAM3 HuggingFace](https://huggingface.co/facebook/sam3)
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [PyTorch Documentation](https://pytorch.org/docs/)
-
+## Notes
+
+- First API call may be slow (model loading on HF side)
+- Subsequent calls are fast
+- API is billed per request
+- No local model downloads needed
