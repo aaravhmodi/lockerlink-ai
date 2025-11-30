@@ -101,16 +101,30 @@ def segment_image(
     """
     try:
         # Load model if not already loaded
+        import time
+        inference_start = time.time()
+        print(f"DEBUG [sam3_inference]: Starting segmentation with prompt: '{text_prompt}'")
+        print(f"DEBUG [sam3_inference]: Image size: {image.size}, mode: {image.mode}")
+        
+        model_load_start = time.time()
         model, processor = load_sam3_image_model()
+        model_load_time = time.time() - model_load_start
+        print(f"DEBUG [sam3_inference]: Model loading took {model_load_time:.3f}s")
+        
         device = get_device()
+        print(f"DEBUG [sam3_inference]: Using device: {device}")
         
         logger.debug(f"Segmenting image with text prompt: '{text_prompt}'")
         
         # Clear any cached tensors before processing
+        cache_start = time.time()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            print(f"DEBUG [sam3_inference]: Cleared CUDA cache in {time.time() - cache_start:.3f}s")
         
         # Prepare inputs based on prompt type
+        input_prep_start = time.time()
+        print(f"DEBUG [sam3_inference]: Preparing inputs...")
         try:
             if box_prompt:
                 # Bounding box input
@@ -134,19 +148,32 @@ def segment_image(
                 ).to(device)
             else:
                 # Text prompt (default)
+                print(f"DEBUG [sam3_inference]: Using text prompt: '{text_prompt}'")
                 inputs = processor(
                     images=image,
                     text=text_prompt,
                     return_tensors="pt"
                 ).to(device)
+                print(f"DEBUG [sam3_inference]: Inputs prepared, keys: {list(inputs.keys())}")
+                if 'pixel_values' in inputs:
+                    print(f"DEBUG [sam3_inference]: Pixel values shape: {inputs['pixel_values'].shape}")
         except Exception as e:
+            input_prep_time = time.time() - input_prep_start
+            print(f"DEBUG [sam3_inference]: Input preparation failed after {input_prep_time:.3f}s: {type(e).__name__}: {str(e)}")
             logger.error(f"Error preparing inputs: {e}", exc_info=True)
             raise Exception(f"Failed to prepare inputs: {str(e)}")
         
+        input_prep_time = time.time() - input_prep_start
+        print(f"DEBUG [sam3_inference]: Input preparation completed in {input_prep_time:.3f}s")
+        
         # Run inference with memory management
+        inference_run_start = time.time()
+        print(f"DEBUG [sam3_inference]: Running model inference...")
         with torch.no_grad():
             try:
                 outputs = model(**inputs)
+                inference_run_time = time.time() - inference_run_start
+                print(f"DEBUG [sam3_inference]: Model inference completed in {inference_run_time:.2f}s")
             except RuntimeError as e:
                 error_str = str(e).lower()
                 if "out of memory" in error_str or "cuda" in error_str:
@@ -168,6 +195,8 @@ def segment_image(
                 raise
         
         # Post-process results
+        postprocess_start = time.time()
+        print(f"DEBUG [sam3_inference]: Post-processing results...")
         try:
             results = processor.post_process_instance_segmentation(
                 outputs,
@@ -177,6 +206,9 @@ def segment_image(
             )[0]
             
             num_objects = len(results["masks"]) if results.get("masks") is not None else 0
+            postprocess_time = time.time() - postprocess_start
+            print(f"DEBUG [sam3_inference]: Post-processing completed in {postprocess_time:.3f}s")
+            print(f"DEBUG [sam3_inference]: Found {num_objects} objects")
             logger.debug(f"Found {num_objects} objects")
             
             # Clear intermediate tensors to free memory
@@ -195,8 +227,13 @@ def segment_image(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             raise Exception(f"Failed to post-process results: {str(e)}")
+            total_inference_time = time.time() - inference_start
+            print(f"DEBUG [sam3_inference]: Total segmentation time: {total_inference_time:.2f}s")
+            print(f"DEBUG [sam3_inference]: Breakdown - Model load: {model_load_time:.2f}s, Input prep: {input_prep_time:.3f}s, Inference: {inference_run_time:.2f}s, Post-process: {postprocess_time:.3f}s")
         
     except Exception as e:
+        total_inference_time = time.time() - inference_start if 'inference_start' in locals() else 0
+        print(f"DEBUG [sam3_inference]: Segmentation failed after {total_inference_time:.2f}s: {type(e).__name__}: {str(e)}")
         logger.error(f"Error in segment_image: {e}", exc_info=True)
         raise Exception(f"Failed to segment image: {str(e)}")
 
